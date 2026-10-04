@@ -37,7 +37,7 @@ onMounted(async () => {
           indicator: `排队中 ${downloadedImgCount}/${totalImgCount}`,
         })
       } else if (event === 'TaskUpdate') {
-        const { chapterId, state, downloadedImgCount, totalImgCount } = data
+        const { chapterId, state, downloadedImgCount, totalImgCount, isDownloaded } = data
 
         const progressData = store.progresses.get(chapterId)
         if (progressData === undefined) {
@@ -47,8 +47,14 @@ onMounted(async () => {
         progressData.state = state
         progressData.downloadedImgCount = downloadedImgCount
         progressData.totalImgCount = totalImgCount
+        progressData.chapterInfo.isDownloaded = isDownloaded
 
-        if (state === 'Completed') {
+        const pickedChapter = store.pickedComic?.chapterInfos.find((chapter) => chapter.chapterId === chapterId)
+        if (pickedChapter !== undefined) {
+          pickedChapter.isDownloaded = isDownloaded
+        }
+
+        if (state === 'Completed' || (state === 'Failed' && isDownloaded)) {
           progressData.chapterInfo.isDownloaded = true
           await syncPickedComic()
           await syncComicInSearch(progressData)

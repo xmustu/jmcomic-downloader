@@ -189,6 +189,11 @@ fn cbz_internal(
         let comic_info_xml = yaserde::ser::to_string_with_config(&comic_info, &cfg)
             .map_err(|err_msg| eyre!("序列化`ComicInfo.xml`失败: {err_msg}"))?;
 
+        let image_paths = get_image_paths(chapter_download_dir, false).wrap_err(format!(
+            "获取`{}`中的图片失败",
+            chapter_download_dir.display()
+        ))?;
+
         // 创建cbz文件
         let zip_file = std::fs::File::create(&zip_path)
             .wrap_err(format!("创建文件`{}`失败", zip_path.display()))?;
@@ -200,11 +205,6 @@ fn cbz_internal(
         zip_writer
             .write_all(comic_info_xml.as_bytes())
             .wrap_err("写入`ComicInfo.xml`失败")?;
-
-        let image_paths = get_image_paths(chapter_download_dir, false).wrap_err(format!(
-            "获取`{}`中的图片失败",
-            chapter_download_dir.display()
-        ))?;
 
         for image_path in image_paths {
             let filename = image_path

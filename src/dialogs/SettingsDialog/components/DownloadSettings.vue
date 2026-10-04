@@ -120,5 +120,8 @@ watch([() => store.config?.apiDomainMode, () => store.config?.customApiDomain], 
 
     <span class="font-bold mt-2">其他</span>
     <n-checkbox class="w-fit" v-model:checked="store.config.shouldDownloadCover">下载封面</n-checkbox>
+    <n-checkbox class="w-fit" v-model:checked="store.config.downloadChaptersAsCbz">
+      下载章节内容直接合并 CBZ 文件落盘
+    </n-checkbox>
   </div>
 </template>

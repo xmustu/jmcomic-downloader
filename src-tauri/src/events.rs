@@ -36,6 +36,7 @@ pub enum DownloadEvent {
         state: DownloadTaskState,
         downloaded_img_count: u32,
         total_img_count: u32,
+        is_downloaded: bool,
     },
 }
 

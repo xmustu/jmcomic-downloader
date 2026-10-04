@@ -1,7 +1,7 @@
 use std::{
     io::Cursor,
     ops::ControlFlow,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{atomic::Ordering, Arc},
     time::Duration,
 };
@@ -13,7 +13,7 @@ use image::codecs::png::PngEncoder;
 use image::{ImageFormat, RgbImage};
 use tauri::AppHandle;
 use tokio::{
-    sync::{watch, SemaphorePermit},
+    sync::{mpsc, watch, SemaphorePermit},
     time::sleep,
 };
 use tracing::instrument;
@@ -30,8 +30,13 @@ pub struct DownloadImgTask {
     download_task: Arc<DownloadTask>,
     url: String,
     index: usize,
-    temp_download_dir: PathBuf,
+    output: DownloadImgOutput,
     block_num: u32,
+}
+
+pub enum DownloadImgOutput {
+    Directory(PathBuf),
+    Cbz(mpsc::Sender<(usize, String, Vec<u8>)>),
 }
 
 impl DownloadImgTask {
@@ -39,7 +44,7 @@ impl DownloadImgTask {
         download_task: Arc<DownloadTask>,
         url: String,
         index: usize,
-        temp_download_dir: PathBuf,
+        output: DownloadImgOutput,
         block_num: u32,
     ) -> Self {
         Self {
@@ -47,7 +52,7 @@ impl DownloadImgTask {
             download_task,
             url,
             index,
-            temp_download_dir,
+            output,
             block_num,
         }
     }
@@ -78,7 +83,14 @@ impl DownloadImgTask {
         loop {
             let state_is_downloading = *state_receiver.borrow() == DownloadTaskState::Downloading;
             tokio::select! {
-                () = &mut download_img_task, if state_is_downloading && permit.is_some() => break,
+                result = &mut download_img_task, if state_is_downloading && permit.is_some() => {
+                    if let Err(err) = result {
+                        let err_title = "处理并保存图片失败";
+                        let message = err.to_message();
+                        tracing::error!(err_title, message);
+                    }
+                    break;
+                },
 
                 control_flow = self.acquire_img_permit(&mut permit), if state_is_downloading && permit.is_none() => {
                     match control_flow {
@@ -103,66 +115,64 @@ impl DownloadImgTask {
     }
 
     #[instrument(level = "error", skip_all)]
-    async fn download_img(&self) {
+    async fn download_img(&self) -> eyre::Result<()> {
         let url = &self.url;
 
         let index_filename = format!("{:04}", self.index + 1);
         let download_format = self.app.get_config().read().download_format;
         let extension = download_format.extension();
 
-        let user_format_path = self
-            .temp_download_dir
-            .join(format!("{index_filename}.{extension}"));
-        let gif_path = self.temp_download_dir.join(format!("{index_filename}.gif"));
-
-        if user_format_path.exists() || gif_path.exists() {
-            self.download_task
-                .downloaded_img_count
-                .fetch_add(1, Ordering::Relaxed);
-
-            self.download_task.emit_download_task_update_event();
-
-            tracing::trace!("图片已存在，跳过下载");
-            return;
+        match &self.output {
+            DownloadImgOutput::Directory(temp_download_dir) => {
+                let user_format_path =
+                    temp_download_dir.join(format!("{index_filename}.{extension}"));
+                let gif_path = temp_download_dir.join(format!("{index_filename}.gif"));
+                if user_format_path.exists() || gif_path.exists() {
+                    self.download_task
+                        .downloaded_img_count
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.download_task.emit_download_task_update_event();
+                    tracing::trace!("图片已存在，跳过下载");
+                    return Ok(());
+                }
+            }
+            DownloadImgOutput::Cbz(_) => {}
         }
 
         tracing::trace!("开始下载图片");
 
-        let (img_data, format) = match self.app.get_jm_client().get_img_data_and_format(url).await {
-            Ok(data) => data,
-            Err(err) => {
-                let err_title = "下载图片失败";
-                let message = err.to_message();
-                tracing::error!(err_title, message);
-                return;
-            }
-        };
+        let (img_data, format) = self
+            .app
+            .get_jm_client()
+            .get_img_data_and_format(url)
+            .await
+            .wrap_err("下载图片失败")?;
         let img_data_len = img_data.len() as u64;
 
         tracing::trace!("图片成功下载到内存");
 
-        let save_path = if format == ImageFormat::Gif {
-            gif_path
+        let filename = if format == ImageFormat::Gif {
+            format!("{index_filename}.gif")
         } else {
-            user_format_path
+            format!("{index_filename}.{extension}")
         };
+        let image_data = process_img(download_format, self.block_num, img_data, format)
+            .await
+            .wrap_err("图片解码、解密或编码失败")?;
 
-        if let Err(err) = save_img(
-            &save_path,
-            download_format,
-            self.block_num,
-            img_data,
-            format,
-        )
-        .await
-        {
-            let err_title = "保存图片失败";
-            let message = err.to_message();
-            tracing::error!(err_title, message);
-            return;
+        match &self.output {
+            DownloadImgOutput::Directory(temp_download_dir) => {
+                let save_path = temp_download_dir.join(filename);
+                std::fs::write(&save_path, image_data)
+                    .wrap_err(format!("保存图片`{}`失败", save_path.display()))?;
+            }
+            DownloadImgOutput::Cbz(sender) => sender
+                .send((self.index, filename, image_data))
+                .await
+                .map_err(|_| eyre::eyre!("CBZ写入通道已关闭"))?,
         }
 
-        tracing::trace!("图片成功保存到磁盘");
+        tracing::trace!("图片已保存");
 
         self.app
             .get_download_manager()
@@ -177,6 +187,7 @@ impl DownloadImgTask {
 
         let img_download_interval_sec = self.app.get_config().read().img_download_interval_sec;
         sleep(Duration::from_secs(img_download_interval_sec)).await;
+        Ok(())
     }
 
     #[instrument(level = "error", skip_all)]
@@ -264,29 +275,23 @@ pub fn calculate_block_num(scramble_id: i64, id: i64, filename: &str) -> u32 {
     level = "error",
     skip_all,
     fields(
-        save_path = %save_path.display(),
         download_format = ?download_format,
         block_num = block_num,
         src_format = ?src_format
     )
 )]
-async fn save_img(
-    save_path: &Path,
+async fn process_img(
     download_format: DownloadFormat,
     block_num: u32,
     src_img_data: Bytes,
     src_format: ImageFormat,
-) -> eyre::Result<()> {
+) -> eyre::Result<Vec<u8>> {
     if src_format == ImageFormat::Gif {
-        std::fs::write(save_path, src_img_data)
-            .wrap_err(format!("保存图片`{}`失败", save_path.display()))?;
-        tracing::trace!("图片成功保存到磁盘");
-        return Ok(());
+        return Ok(src_img_data.to_vec());
     }
 
-    let save_path = save_path.to_path_buf();
     let current_span = tracing::Span::current();
-    let process_img = move || -> eyre::Result<()> {
+    let process_img = move || -> eyre::Result<Vec<u8>> {
         let _enter = current_span.enter();
         let mut src_img = image::load_from_memory(&src_img_data)
             .wrap_err("解码图片失败")?
@@ -316,18 +321,15 @@ async fn save_img(
             }
         }
 
-        std::fs::write(&save_path, dst_img_data)
-            .wrap_err(format!("保存图片`{}`失败", save_path.display()))?;
-        Ok(())
+        Ok(dst_img_data)
     };
 
-    let (sender, receiver) = tokio::sync::oneshot::channel::<eyre::Result<()>>();
+    let (sender, receiver) = tokio::sync::oneshot::channel::<eyre::Result<Vec<u8>>>();
     rayon::spawn(move || {
         let _ = sender.send(process_img());
     });
 
     let result = receiver.await?;
-    tracing::trace!("图片成功保存到磁盘");
     result
 }
 

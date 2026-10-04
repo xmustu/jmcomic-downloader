@@ -33,6 +33,7 @@ pub struct Config {
     pub api_domain_mode: ApiDomainMode,
     pub custom_api_domain: String,
     pub should_download_cover: bool,
+    pub download_chapters_as_cbz: bool,
     pub create_pdf_concurrency: usize,
     pub enable_merge_pdf: bool,
     /// 导出跳过模式
@@ -126,6 +127,7 @@ impl Config {
             api_domain_mode: ApiDomainMode::Domain2,
             custom_api_domain: API_DOMAIN_2.to_string(),
             should_download_cover: true,
+            download_chapters_as_cbz: false,
             create_pdf_concurrency: cpu_core_num,
             enable_merge_pdf: true,
             export_skip_mode: ExportSkipMode::default(),

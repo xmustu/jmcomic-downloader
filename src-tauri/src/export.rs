@@ -8,7 +8,7 @@ use std::{
 };
 
 pub use cbz::{cbz, cbz_chapters};
-use eyre::WrapErr;
+use eyre::{eyre, WrapErr};
 use parking_lot::Mutex;
 pub use pdf::{pdf, pdf_chapters};
 use tracing::instrument;
@@ -115,5 +115,21 @@ fn get_image_paths(images_dir: &Path, must_be_common_img: bool) -> eyre::Result<
         })
         .collect();
     image_paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    if image_paths.is_empty() {
+        let chapter_name = images_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let cbz_path = images_dir
+            .parent()
+            .map(|parent| parent.join(format!("{chapter_name}.cbz")));
+        if cbz_path.is_some_and(|path| path.is_file()) {
+            return Err(eyre!("该章节已保存为CBZ，当前不支持从CBZ再次导出"));
+        }
+        return Err(eyre!(
+            "章节目录`{}`中没有可导出的图片",
+            images_dir.display()
+        ));
+    }
     Ok(image_paths)
 }
