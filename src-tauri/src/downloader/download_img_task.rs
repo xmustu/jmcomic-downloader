@@ -280,7 +280,7 @@ pub fn calculate_block_num(scramble_id: i64, id: i64, filename: &str) -> u32 {
         src_format = ?src_format
     )
 )]
-async fn process_img(
+pub(crate) async fn process_img(
     download_format: DownloadFormat,
     block_num: u32,
     src_img_data: Bytes,

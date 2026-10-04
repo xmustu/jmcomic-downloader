@@ -43,6 +43,14 @@ async getComic(aid: number) : Promise<Result<Comic, CommandError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async getChapterPreviewImages(chapterId: number) : Promise<Result<string[], CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_chapter_preview_images", { chapterId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getFavoriteFolder(folderId: number, page: number, sort: FavoriteSort) : Promise<Result<GetFavoriteResult, CommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_favorite_folder", { folderId, page, sort }) };

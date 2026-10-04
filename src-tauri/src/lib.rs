@@ -44,6 +44,7 @@ pub fn run() {
             login,
             search,
             get_comic,
+            get_chapter_preview_images,
             get_favorite_folder,
             get_weekly_info,
             get_weekly,

@@ -2174,6 +2174,7 @@ dependencies = [
  "md5",
  "notify",
  "parking_lot 0.12.3",
+ "rand 0.8.5",
  "rayon",
  "reqwest",
  "reqwest-middleware",

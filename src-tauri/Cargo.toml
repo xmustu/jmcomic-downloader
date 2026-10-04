@@ -32,6 +32,7 @@ reqwest-retry = { version = "0.6.1" }
 reqwest-middleware = { version = "0.3.3 " }
 
 base64 = { version = "0.22" }
+rand = { version = "0.8.5" }
 md5 = { version = "0.7.0" }
 aes = { version = "0.8.4" }
 

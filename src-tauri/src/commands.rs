@@ -3,12 +3,15 @@ use std::time::Duration;
 use std::{
     fs::File,
     io::{BufRead, BufReader},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 // TODO: 用`#![allow(clippy::used_underscore_binding)]`来消除警告
 use eyre::{eyre, WrapErr};
 use indexmap::IndexMap;
+use rand::seq::index;
+use rand::thread_rng;
 use tauri::AppHandle;
 use tauri_plugin_opener::OpenerExt;
 use tauri_specta::Event;
@@ -19,9 +22,11 @@ use tracing::{instrument, Instrument};
 use walkdir::WalkDir;
 
 use crate::config::Config;
+use crate::downloader::download_img_task::{calculate_block_num, process_img};
 use crate::errors::{CommandError, CommandResult};
 use crate::events::{DownloadAllFavoritesEvent, UpdateDownloadedComicsEvent};
 use crate::extensions::{AppHandleExt, EyreReportToMessage, WalkDirEntryExt};
+use crate::jm_client::IMAGE_DOMAIN;
 use crate::responses::{GetUserProfileRespData, GetWeeklyInfoRespData};
 use crate::types::{
     ChapterInfo, Comic, ComicInFavorite, ComicInSearch, ComicInWeekly, FavoriteSort,
@@ -154,6 +159,93 @@ pub async fn get_comic(app: AppHandle, aid: i64) -> CommandResult<Comic> {
         .map_err(|err| CommandError::from("获取漫画信息失败", err))?;
 
     Ok(comic)
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+#[instrument(level = "error", skip_all, fields(chapter_id = chapter_id))]
+pub async fn get_chapter_preview_images(
+    app: AppHandle,
+    chapter_id: i64,
+) -> CommandResult<Vec<String>> {
+    let jm_client = app.get_jm_client();
+    let chapter = jm_client
+        .get_chapter(chapter_id)
+        .await
+        .map_err(|err| CommandError::from("获取章节预览图失败", err))?;
+
+    let selected_images = sample_preview_indices(chapter.images.len())
+        .into_iter()
+        .map(|index| chapter.images[index].clone())
+        .collect::<Vec<_>>();
+    if selected_images.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let scramble_id = jm_client
+        .get_scramble_id(chapter_id)
+        .await
+        .map_err(|err| CommandError::from("获取章节预览图失败", err))?;
+    let download_format = app.get_config().read().download_format;
+    let mut preview_images = Vec::with_capacity(selected_images.len());
+
+    for filename in selected_images {
+        let result = async {
+            let image_url = format!("https://{IMAGE_DOMAIN}/media/photos/{chapter_id}/{filename}");
+            let (image_data, source_format) = jm_client
+                .get_img_data_and_format(&image_url)
+                .await
+                .wrap_err(format!("下载预览图`{image_url}`失败"))?;
+
+            let filename_stem = Path::new(&filename)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| eyre!("获取预览图`{filename}`的文件名失败"))?;
+            let block_num = calculate_block_num(scramble_id, chapter_id, filename_stem);
+            let is_gif = source_format == image::ImageFormat::Gif;
+            let processed_image =
+                process_img(download_format, block_num, image_data, source_format)
+                    .await
+                    .wrap_err(format!("处理预览图`{filename}`失败"))?;
+
+            let mime_type = if is_gif {
+                "image/gif"
+            } else {
+                match download_format {
+                    crate::types::DownloadFormat::Jpeg => "image/jpeg",
+                    crate::types::DownloadFormat::Png => "image/png",
+                    crate::types::DownloadFormat::Webp => "image/webp",
+                }
+            };
+            Ok::<_, eyre::Report>(format!(
+                "data:{mime_type};base64,{}",
+                STANDARD.encode(processed_image)
+            ))
+        }
+        .await;
+
+        match result {
+            Ok(data_url) => preview_images.push(data_url),
+            Err(err) => tracing::warn!(
+                chapter_id,
+                filename,
+                error = %err,
+                "跳过加载失败的章节预览图"
+            ),
+        }
+    }
+
+    Ok(preview_images)
+}
+
+fn sample_preview_indices(page_count: usize) -> Vec<usize> {
+    if page_count == 0 {
+        return Vec::new();
+    }
+
+    let mut selected = index::sample(&mut thread_rng(), page_count, page_count.min(3)).into_vec();
+    selected.sort_unstable();
+    selected
 }
 
 #[tauri::command(async)]
@@ -843,4 +935,25 @@ pub fn open_log_file(path: &str) -> CommandResult<Vec<LogMetadata>> {
     }
 
     Ok(logs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sample_preview_indices;
+    use std::collections::HashSet;
+
+    #[test]
+    fn samples_at_most_three_valid_unique_page_indices() {
+        assert!(sample_preview_indices(0).is_empty());
+
+        for page_count in 1..=30 {
+            let indices = sample_preview_indices(page_count);
+            assert_eq!(indices.len(), page_count.min(3));
+            assert!(indices.iter().all(|index| *index < page_count));
+            assert_eq!(
+                indices.iter().copied().collect::<HashSet<_>>().len(),
+                indices.len()
+            );
+        }
+    }
 }
